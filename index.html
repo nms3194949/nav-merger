@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>基金 Database 合併器（來源多分頁 → 目標 Database）</title>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <style>
+    body { font-family:"Microsoft JhengHei", Arial, sans-serif; max-width: 980px; margin: 30px auto; padding: 20px; background:#f0f4f8; color:#333; }
+    .container { background:#fff; padding: 26px; border-radius: 12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); }
+    h2 { text-align:center; color:#2c3e50; margin:0 0 18px; border-bottom:3px solid #f39c12; padding-bottom:12px; }
+    .section { margin-bottom: 14px; padding: 16px; border:1px solid #e1e4e8; border-radius: 8px; background:#fff; }
+    .section-title { font-weight:bold; margin-bottom:10px; display:block; color:#d35400; font-size:1.05em; }
+    .hint { font-size:.9em; color:#7f8c8d; margin:8px 0 0; line-height:1.5; }
+    input[type="file"], input[type="number"], select {
+      width:100%; padding:10px; background:#fffbf2; border:2px solid #fae5d3; border-radius:6px; box-sizing:border-box; margin-top:6px;
+    }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    @media (max-width: 900px){ .grid{grid-template-columns:1fr;} }
+    .modes { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; }
+    .mode { padding:10px 12px; border:1px solid #e1e4e8; border-radius:8px; background:#fbfdff; display:flex; align-items:center; gap:8px; cursor:pointer; }
+    .tiny { font-size:12px; color:#7f8c8d; margin-top:6px; }
+    button{
+      display:block; width:100%; padding:16px; background:#f39c12; color:#fff; border:none; border-radius:8px;
+      font-size:18px; font-weight:bold; cursor:pointer; transition:.2s; margin-top:16px;
+      box-shadow:0 4px 6px rgba(243,156,18,.3);
+    }
+    button:hover{ background:#e67e22; transform: translateY(-1px); }
+    #status { margin-top: 18px; padding: 16px; border-radius: 8px; white-space: pre-line; line-height:1.6; font-size:.95em; background:#fff; border:1px solid #eee; }
+    .success { background:#d4edda; color:#155724; border-left:5px solid #28a745; }
+    .error { background:#f8d7da; color:#721c24; border-left:5px solid #dc3545; }
+    .processing { background:#e2e3e5; color:#383d41; border-left:5px solid #6c757d; }
+
+    .pillWrap{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;}
+    .pill{font-size:12px; background:#fff6e6; border:1px solid #fae5d3; color:#7a4b00; padding:6px 10px; border-radius:999px;}
+    details{margin-top:10px;}
+    summary{cursor:pointer; color:#2c3e50; font-weight:700;}
+    .hide { display:none; }
+  </style>
+</head>
+
+<body>
+<div class="container">
+  <h2>📈 基金 Database 合併器（來源多分頁 → 目標 Database）</h2>
+
+  <div class="section">
+    <label class="section-title">1) 上傳目標檔（Target）</label>
+    <div class="hint">
+      ✅ 固定讀取 <b>Database</b> 分頁（沒有就直接報錯）<br/>
+      目標：<b>A欄=日期</b>、<b>第1列=欄位名稱</b>
+    </div>
+    <input type="file" id="mainFile" accept=".xlsx,.xls" />
+  </div>
+
+  <div class="section">
+    <label class="section-title">2) 上傳來源檔（Source，多分頁）</label>
+    <div class="hint">
+      ✅ 每個分頁 = 一支基金，<b>分頁名稱=目標欄位名稱</b><br/>
+      來源每分頁：預設 A=日期、B=淨值（有表頭也會嘗試自動猜「日期/淨值」欄）
+    </div>
+    <input type="file" id="dataFile" accept=".xlsx,.xls" />
+
+    <!-- 來源分頁預覽 -->
+    <div id="sourcePreview" class="hide">
+      <details open>
+        <summary>已偵測到的基金分頁（<span id="sheetCount">0</span>）</summary>
+        <div class="pillWrap" id="sheetPills"></div>
+      </details>
+      <div class="tiny">確認：這些分頁名稱會直接變成目標 Database 的欄位名稱。</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <label class="section-title">3) 寫入策略</label>
+
+    <div class="modes">
+      <label class="mode"><input type="radio" name="mode" value="fill" checked /> 只補空白（Fill blanks）</label>
+      <label class="mode"><input type="radio" name="mode" value="overwrite" /> 覆蓋全部（Overwrite，以來源為準，缺值會清空）</label>
+      <label class="mode"><input type="radio" name="mode" value="smart" /> 智慧覆蓋（差異 > 門檻% 才覆蓋）</label>
+    </div>
+
+    <div id="thresholdBox" class="grid" style="margin-top:10px;">
+      <div>
+        <label>智慧覆蓋門檻（%）</label>
+        <input id="thresholdPct" type="number" min="0" step="0.01" value="0.30" />
+        <div class="tiny">例如 0.30 = 差異超過 0.30% 才覆蓋原值</div>
+      </div>
+      <div>
+        <label>是否輸出 DiffReport 分頁</label>
+        <select id="diffExport">
+          <option value="yes" selected>是（同一檔案內加 DiffReport）</option>
+          <option value="no">否（只輸出合併後 Database）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:10px;">
+      <div>
+        <label>目標缺少日期時</label>
+        <select id="missingDatePolicy">
+          <option value="add" selected>自動新增日期列（並在最後依日期排序）</option>
+          <option value="skip">跳過不寫（不新增日期列）</option>
+        </select>
+      </div>
+      <div>
+        <label>日期排序方式</label>
+        <select id="sortOrder">
+          <option value="asc">升冪（舊 → 新）</option>
+          <option value="desc" selected>降冪（新 → 舊）</option>
+        </select>
+        <div class="tiny">預設：最新日期在最上面（desc）</div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:10px;">
+      <div>
+        <label>Overwrite 清空範圍</label>
+        <select id="overwriteClearScope">
+          <option value="range" selected>僅清空「來源日期範圍(min~max)內」缺值</option>
+          <option value="all">清空「整個目標欄位」再重寫（最強但最危險）</option>
+        </select>
+        <div class="tiny">建議用「日期範圍內」避免把來源沒涵蓋的歷史區間也清掉。</div>
+      </div>
+      <div></div>
+    </div>
+  </div>
+
+  <button id="runBtn">🚀 開始合併</button>
+  <div id="status"></div>
+</div>
+
+<script>
+  // ===== 日期 Key：YYYY/MM/DD =====
+  function pad2(n){ return String(n).padStart(2,"0"); }
+  function ymdSlash(y,m,d){ return `${y}/${pad2(m)}/${pad2(d)}`; }
+
+  function getStandardDateKey(input){
+    if(input === null || input === undefined || input === "") return null;
+
+    if(input instanceof Date && !isNaN(input.getTime())){
+      return ymdSlash(input.getFullYear(), input.getMonth()+1, input.getDate());
+    }
+
+    if(typeof input === "number" && isFinite(input)){
+      const dc = XLSX.SSF.parse_date_code(input);
+      if(dc && dc.y && dc.m && dc.d) return ymdSlash(dc.y, dc.m, dc.d);
+      return null;
+    }
+
+    const s = String(input).trim();
+    if(!s) return null;
+
+    let m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+    if(m) return ymdSlash(+m[1], +m[2], +m[3]);
+
+    m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if(m) return ymdSlash(+m[1], +m[2], +m[3]);
+
+    const t = Date.parse(s);
+    if(!isNaN(t)){
+      const d = new Date(t);
+      return ymdSlash(d.getFullYear(), d.getMonth()+1, d.getDate());
+    }
+    return null;
+  }
+
+  function parseDateKeyToInt(dateKey){
+    const [y,m,d] = dateKey.split("/").map(Number);
+    return y*10000 + m*100 + d;
+  }
+
+  function toNumber(v){
+    if(v === null || v === undefined || v === "") return null;
+    if(typeof v === "number" && isFinite(v)) return v;
+    const s = String(v).replace(/,/g,"").trim();
+    if(!s) return null;
+    const n = Number(s);
+    return isFinite(n) ? n : null;
+  }
+
+  function readExcel(file){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = (e)=>{
+        try{
+          const data = new Uint8Array(e.target.result);
+          const wb = XLSX.read(data, {type:"array", cellDates:true});
+          resolve(wb);
+        }catch(err){ reject(err); }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function mustGetSheet(wb, sheetName, role){
+    if(!wb.SheetNames.includes(sheetName)){
+      throw new Error(`${role} 檔案找不到分頁：「${sheetName}」。請確認分頁名稱正確。`);
+    }
+    return wb.Sheets[sheetName];
+  }
+
+  function guessColIndex(headers, keywords, fallbackIdx){
+    const lower = headers.map(h => String(h||"").trim().toLowerCase());
+    for(const kw of keywords){
+      const k = kw.toLowerCase();
+      const idx = lower.findIndex(x => x.includes(k));
+      if(idx >= 0) return idx;
+    }
+    return fallbackIdx;
+  }
+
+  function getMode(){
+    const el = document.querySelector('input[name="mode"]:checked');
+    return el ? el.value : "fill";
+  }
+
+  function updateThresholdUI(){
+    const mode = getMode();
+    document.getElementById("thresholdBox").classList.toggle("hide", mode !== "smart");
+  }
+  document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener("change", updateThresholdUI));
+  updateThresholdUI();
+
+  function rebuildTargetDateRowMap(mainAOA, dateColIdx){
+    const map = new Map();
+    let dup = 0;
+    for(let r=1; r<mainAOA.length; r++){
+      const row = mainAOA[r] || [];
+      const key = getStandardDateKey(row[dateColIdx]);
+      if(!key) continue;
+      if(map.has(key)) dup++;
+      else map.set(key, r);
+    }
+    return { map, dup };
+  }
+
+  function ensureDateRow(mainAOA, headersLen, dateColIdx, dateKey){
+    const [y,m,d] = dateKey.split("/").map(Number);
+    const jsDate = new Date(y, m-1, d);
+    const newRow = new Array(headersLen).fill("");
+    newRow[dateColIdx] = jsDate;
+    mainAOA.push(newRow);
+    return mainAOA.length - 1;
+  }
+
+  // ===== 清理空白列（避免排序後一堆空列） =====
+  function isRowEmpty(row){
+    if (!row) return true;
+    for (let i = 0; i < row.length; i++){
+      const v = row[i];
+      if (v !== null && v !== undefined && String(v).trim() !== "") return false;
+    }
+    return true;
+  }
+
+  // ✅ 只保留「日期可解析」的資料列，其他（空列/日期空）一律移除
+  function pruneEmptyDateRows(mainAOA, dateColIdx){
+    const header = mainAOA[0];
+    const out = [header];
+    for (let r = 1; r < mainAOA.length; r++){
+      const row = mainAOA[r] || [];
+      if (isRowEmpty(row)) continue;
+      const dateKey = getStandardDateKey(row[dateColIdx]);
+      if (!dateKey) continue;
+      out.push(row);
+    }
+    return out;
+  }
+
+  function sortByDate(mainAOA, dateColIdx, order){
+    const header = mainAOA[0];
+    const rows = mainAOA.slice(1);
+
+    rows.sort((a,b)=>{
+      const ka = getStandardDateKey((a||[])[dateColIdx]);
+      const kb = getStandardDateKey((b||[])[dateColIdx]);
+      const ai = ka ? parseDateKeyToInt(ka) : 99999999;
+      const bi = kb ? parseDateKeyToInt(kb) : 99999999;
+      return order === "desc" ? (bi - ai) : (ai - bi);
+    });
+
+    return [header, ...rows];
+  }
+
+  // ===== 來源分頁預覽（上傳即顯示） =====
+  let cachedSourceSheetNames = [];
+
+  async function onSourceFileSelected(){
+    const fileInput = document.getElementById("dataFile");
+    const preview = document.getElementById("sourcePreview");
+    const pills = document.getElementById("sheetPills");
+    const count = document.getElementById("sheetCount");
+
+    pills.innerHTML = "";
+    preview.classList.add("hide");
+    cachedSourceSheetNames = [];
+
+    if(!fileInput.files.length) return;
+
+    try{
+      const wb = await readExcel(fileInput.files[0]);
+      cachedSourceSheetNames = wb.SheetNames.map(s => String(s||"").trim()).filter(Boolean);
+
+      count.textContent = String(cachedSourceSheetNames.length);
+
+      const showList = cachedSourceSheetNames.slice(0, 80);
+      showList.forEach(name=>{
+        const d = document.createElement("div");
+        d.className = "pill";
+        d.textContent = name;
+        pills.appendChild(d);
+      });
+      if(cachedSourceSheetNames.length > 80){
+        const d = document.createElement("div");
+        d.className = "pill";
+        d.textContent = `... 另外還有 ${cachedSourceSheetNames.length - 80} 個`;
+        pills.appendChild(d);
+      }
+
+      preview.classList.remove("hide");
+    }catch(err){
+      const statusDiv = document.getElementById("status");
+      statusDiv.className = "error";
+      statusDiv.textContent = "❌ 來源檔讀取失敗：" + (err?.message || String(err));
+    }
+  }
+  document.getElementById("dataFile").addEventListener("change", onSourceFileSelected);
+
+  // ===== 主流程 =====
+  async function processData(){
+    const statusDiv = document.getElementById("status");
+    const mainInput = document.getElementById("mainFile");
+    const dataInput = document.getElementById("dataFile");
+
+    const mode = getMode();
+    const thresholdPct = Math.max(0, Number(document.getElementById("thresholdPct").value || 0));
+    const diffExport = document.getElementById("diffExport").value;
+    const missingPolicy = document.getElementById("missingDatePolicy").value; // add / skip
+    const sortOrder = document.getElementById("sortOrder").value; // asc / desc
+    const clearScope = document.getElementById("overwriteClearScope").value; // range / all
+
+    if(!mainInput.files.length || !dataInput.files.length){
+      alert("請同時選擇「目標檔」與「來源檔」！");
+      return;
+    }
+
+    statusDiv.className = "processing";
+    statusDiv.textContent = "⏳ 正在讀取並合併資料...";
+
+    try{
+      // 目標
+      const mainWB = await readExcel(mainInput.files[0]);
+      const mainSheet = mustGetSheet(mainWB, "Database", "目標(Target)");
+
+      let mainAOA = XLSX.utils.sheet_to_json(mainSheet, {header:1, raw:true, defval:""});
+      if(!mainAOA || mainAOA.length < 2) throw new Error("目標 Database 空的或格式不對（至少要有標題列+資料列）");
+
+      const dateColIdx = 0;
+      let headers = (mainAOA[0] || []).map(x => String(x||"").trim());
+      if(headers.length < 1) throw new Error("目標 Database 的標題列（第1列）為空");
+      mainAOA[0] = headers;
+
+      // ✅ 先清掉日期空/整列空，避免排序後一堆空列
+      mainAOA = pruneEmptyDateRows(mainAOA, dateColIdx);
+
+      let { map: targetMap, dup: targetDupDates } = rebuildTargetDateRowMap(mainAOA, dateColIdx);
+      if(targetMap.size === 0) throw new Error("目標 Database A欄沒有任何有效日期");
+
+      // 來源（多分頁）
+      const srcWB = await readExcel(dataInput.files[0]);
+      const srcSheetNames = srcWB.SheetNames.map(s => String(s||"").trim()).filter(Boolean);
+      if(srcSheetNames.length === 0) throw new Error("來源檔沒有任何分頁");
+
+      // counters
+      let processedFunds = 0, addedCols = 0, totalNewDateRows = 0;
+      let totalSrcDupDates = 0;
+      let totalWritten = 0, totalAdded = 0, totalOverwritten = 0, totalSkipped = 0;
+      let totalCleared = 0;
+
+      const diffRows = [];
+
+      function decideWrite(oldVal, newVal){
+        const oldNum = toNumber(oldVal);
+        const oldEmpty = (oldNum === null);
+
+        if(mode === "fill"){
+          return { write: oldEmpty, action: oldEmpty ? "新增" : "跳過(已有值)", oldNum };
+        }
+        if(mode === "overwrite"){
+          return { write: true, action: oldEmpty ? "新增" : "覆蓋", oldNum };
+        }
+        // smart
+        if(oldEmpty) return { write: true, action: "新增", oldNum };
+        if(oldNum === 0){
+          const pctAbs = (newVal === 0) ? 0 : 9999;
+          return pctAbs > thresholdPct
+            ? { write:true, action:`覆蓋(差異>${thresholdPct}%)`, oldNum }
+            : { write:false, action:`跳過(差異<=${thresholdPct}%)`, oldNum };
+        }
+        const pctAbs = Math.abs((newVal - oldNum) / oldNum) * 100;
+        return pctAbs > thresholdPct
+          ? { write:true, action:`覆蓋(差異>${thresholdPct}%)`, oldNum }
+          : { write:false, action:`跳過(差異<=${thresholdPct}%)`, oldNum };
+      }
+
+      for(const fundNameRaw of srcSheetNames){
+        const fundName = fundNameRaw;
+        const ws = srcWB.Sheets[fundNameRaw];
+
+        const aoa = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:""});
+        if(!aoa || aoa.length < 2) continue;
+
+        const srcHeaders = (aoa[0] || []).map(x => String(x||"").trim());
+        const srcDateIdx = guessColIndex(srcHeaders, ["日期","date"], 0);
+        const srcNavIdx  = guessColIndex(srcHeaders, ["淨值","nav","price","value","unit"], 1);
+
+        // 目標基金欄位：分頁名
+        let fundColIdx = headers.findIndex(h => (h||"").trim() === fundName);
+        if(fundColIdx === -1){
+          fundColIdx = headers.length;
+          headers.push(fundName);
+          mainAOA[0] = headers;
+          addedCols++;
+
+          // 補齊每列長度
+          for(let r=1; r<mainAOA.length; r++){
+            if(!mainAOA[r]) mainAOA[r] = [];
+            if(mainAOA[r].length < headers.length) mainAOA[r].length = headers.length;
+          }
+        }
+
+        // 來源 map：dateKey -> nav（同日重複取最後）
+        const srcMap = new Map();
+        let srcDup = 0;
+        let minInt = null, maxInt = null;
+
+        for(let i=1; i<aoa.length; i++){
+          const row = aoa[i] || [];
+          const dateKey = getStandardDateKey(row[srcDateIdx]);
+          if(!dateKey) continue;
+
+          const di = parseDateKeyToInt(dateKey);
+          if(minInt === null || di < minInt) minInt = di;
+          if(maxInt === null || di > maxInt) maxInt = di;
+
+          const nav = toNumber(row[srcNavIdx]);
+          if(nav === null) continue; // 缺值：overwrite 後面會清空
+
+          if(srcMap.has(dateKey)) srcDup++;
+          srcMap.set(dateKey, nav);
+        }
+
+        if(minInt === null || maxInt === null) continue;
+
+        processedFunds++;
+        totalSrcDupDates += srcDup;
+
+        // (A) 先把來源有 nav 的日期寫入
+        for(const [dateKey, newNav] of srcMap.entries()){
+          let rowIndex = targetMap.get(dateKey);
+          if(rowIndex === undefined){
+            if(missingPolicy === "skip") continue;
+            rowIndex = ensureDateRow(mainAOA, headers.length, dateColIdx, dateKey);
+            targetMap.set(dateKey, rowIndex);
+            totalNewDateRows++;
+          }
+
+          const oldVal = (mainAOA[rowIndex] || [])[fundColIdx];
+          const { write, action, oldNum } = decideWrite(oldVal, newNav);
+
+          let pctSigned = "";
+          if(oldNum !== null && oldNum !== 0) pctSigned = ((newNav - oldNum) / oldNum) * 100;
+
+          if(write){
+            if(!mainAOA[rowIndex]) mainAOA[rowIndex] = [];
+            mainAOA[rowIndex][fundColIdx] = newNav;
+            totalWritten++;
+            if(oldNum === null) totalAdded++; else totalOverwritten++;
+          }else{
+            totalSkipped++;
+          }
+
+          if(diffExport === "yes"){
+            diffRows.push([fundName, dateKey, oldNum === null ? "" : oldNum, newNav, pctSigned === "" ? "" : pctSigned, action]);
+          }
+        }
+
+        // (B) Overwrite 強化：清空來源缺值
+        if(mode === "overwrite"){
+          if(clearScope === "all"){
+            // 先清空整欄（除了標題列）
+            for(let r=1; r<mainAOA.length; r++){
+              if(!mainAOA[r]) continue;
+              const oldAny = mainAOA[r][fundColIdx];
+              const hasSomething = oldAny !== null && oldAny !== undefined && String(oldAny).trim() !== "";
+              if(hasSomething){
+                mainAOA[r][fundColIdx] = "";
+                totalCleared++;
+              }
+            }
+            // 再重寫來源有值日期
+            for(const [dateKey, newNav] of srcMap.entries()){
+              let rowIndex = targetMap.get(dateKey);
+              if(rowIndex === undefined){
+                if(missingPolicy === "skip") continue;
+                rowIndex = ensureDateRow(mainAOA, headers.length, dateColIdx, dateKey);
+                targetMap.set(dateKey, rowIndex);
+                totalNewDateRows++;
+              }
+              if(!mainAOA[rowIndex]) mainAOA[rowIndex] = [];
+              mainAOA[rowIndex][fundColIdx] = newNav;
+            }
+          }else{
+            // ✅ 預設：只清來源日期範圍(min~max)內缺值（srcMap 沒有 -> 清空）
+            for(let r=1; r<mainAOA.length; r++){
+              const row = mainAOA[r] || [];
+              const dateKey = getStandardDateKey(row[dateColIdx]);
+              if(!dateKey) continue;
+
+              const di = parseDateKeyToInt(dateKey);
+              if(di < minInt || di > maxInt) continue;
+
+              if(!srcMap.has(dateKey)){
+                const oldAny = row[fundColIdx];
+                const hasSomething = oldAny !== null && oldAny !== undefined && String(oldAny).trim() !== "";
+                if(hasSomething){
+                  const oldNum = toNumber(oldAny);
+                  row[fundColIdx] = "";
+                  totalCleared++;
+                  if(diffExport === "yes"){
+                    diffRows.push([fundName, dateKey, oldNum === null ? oldAny : oldNum, "", "", "清空(來源缺值)"]);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if(processedFunds === 0){
+        throw new Error("來源檔沒有任何可處理的分頁資料（每分頁至少要有日期欄資料列）");
+      }
+
+      // 最後排序（預設 desc 最新在上）
+      mainAOA = sortByDate(mainAOA, dateColIdx, sortOrder);
+
+      // 排序後再砍一次空列（保險），避免新增列時意外產生空列
+      mainAOA = pruneEmptyDateRows(mainAOA, dateColIdx);
+
+      // 重建索引（更新 dup）
+      const rebuilt = rebuildTargetDateRowMap(mainAOA, dateColIdx);
+      targetDupDates = rebuilt.dup;
+
+      // 回寫 Database
+      const newSheet = XLSX.utils.aoa_to_sheet(mainAOA);
+      const range = XLSX.utils.decode_range(newSheet["!ref"]);
+      for(let R = range.s.r + 1; R <= range.e.r; ++R){
+        const cellRef = XLSX.utils.encode_cell({c:0, r:R});
+        if(newSheet[cellRef]) newSheet[cellRef].z = "yyyy/mm/dd";
+      }
+      mainWB.Sheets["Database"] = newSheet;
+
+      // DiffReport
+      if(diffExport === "yes"){
+        const reportName = "DiffReport";
+        const reportAOA = [["基金(分頁名)","日期","原淨值","新淨值","差異(%)","處理"], ...diffRows];
+        const reportWS = XLSX.utils.aoa_to_sheet(reportAOA);
+
+        const idx = mainWB.SheetNames.indexOf(reportName);
+        if(idx >= 0) mainWB.SheetNames.splice(idx, 1);
+        delete mainWB.Sheets[reportName];
+
+        XLSX.utils.book_append_sheet(mainWB, reportWS, reportName);
+      }
+
+      // 匯出
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${pad2(now.getMonth()+1)}${pad2(now.getDate())}_${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+      const outName = `Updated_Database_MultiFunds_Sorted_${stamp}.xlsx`;
+      XLSX.writeFile(mainWB, outName);
+
+      statusDiv.className = "success";
+      statusDiv.textContent =
+        `🎉 完成！已下載：${outName}\n\n` +
+        `來源分頁共：${cachedSourceSheetNames.length || "(未預覽)"}\n` +
+        `實際處理基金分頁：${processedFunds}\n` +
+        `新增基金欄位：${addedCols}\n` +
+        `新增日期列：${totalNewDateRows}\n\n` +
+        `寫入筆數：${totalWritten}\n` +
+        `新增：${totalAdded} / 覆蓋：${totalOverwritten} / 跳過：${totalSkipped}\n` +
+        `Overwrite 清空筆數：${totalCleared}\n` +
+        `來源重複日期（合計）：${totalSrcDupDates}\n` +
+        `目標重複日期：${targetDupDates}\n` +
+        (diffExport === "yes" ? `\n已附加 DiffReport 分頁（含清空紀錄）。` : "");
+
+    }catch(err){
+      console.error(err);
+      statusDiv.className = "error";
+      statusDiv.textContent = "❌ 發生錯誤：" + (err?.message || String(err));
+    }
+  }
+
+  document.getElementById("runBtn").addEventListener("click", processData);
+</script>
+</body>
+</html>
